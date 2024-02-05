@@ -81,7 +81,7 @@ def analyze_silences_praat(sound, noise_reduction=True, silence_threshold=40, mi
 
     return silences
 
-def classify_silences(silences, total_duration_threshold=15, initial_delay_threshold=5, long_silence_threshold=9):
+def classify_silences(silences, total_duration_threshold=15, initial_delay_threshold=15, long_silence_threshold=10):
 
     total_silence_duration = sum(end - start for start, end in silences)
     longest_silence = max((end - start for start, end in silences), default=0)
