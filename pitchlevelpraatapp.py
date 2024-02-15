@@ -2,14 +2,16 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
 from moviepy.editor import VideoFileClip
 import parselmouth
+from parselmouth.praat import call, run_file
 import numpy as np
 import noisereduce as nr
 import os
 import tempfile
 
+
 app = FastAPI()
 
-TOTAL_CRITERIA = 4
+TOTAL_CRITERIA = 5
 
 
 def analyze_pitch(audio_data):
@@ -97,6 +99,75 @@ def classify_silences(silences, total_duration_threshold=15, initial_delay_thres
     else:
         return "normal"
 
+def segment_audio(sound, segment_length=15.0):
+    segments = []
+    for start_time in np.arange(0, sound.duration, segment_length):
+        end_time = start_time + segment_length
+        if end_time > sound.duration:
+            end_time = sound.duration
+        segment = sound.extract_part(from_time=start_time, to_time=end_time, preserve_times=True)
+        segments.append(segment)
+    return segments
+
+def analyze_segment(segment, sourcerun, path):
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        temp_path = tmp.name
+        segment.save(temp_path, "WAV")
+    
+    objects = run_file(sourcerun, -20, 2, 0.3, "yes", temp_path, path, 80, 400, 0.01, capture_output=True)
+    os.remove(temp_path)  
+
+    z1 = str(objects[1])
+    z2 = z1.strip().split()
+    return z2
+
+def average_pronunciation_score(audio_data, sourcerun, path):
+    sound = parselmouth.Sound(audio_data)
+    segments = segment_audio(sound)
+
+    analyzed_segments_count = 0
+    insufficient_data_count = 0
+    scores = []
+
+    for segment in segments:
+        z2 = analyze_segment(segment, sourcerun, path)
+        if len(z2) > 14:  
+            scores.append(float(z2[14]))
+            analyzed_segments_count += 1
+        else:
+            insufficient_data_count += 1
+
+    if scores:
+        average_score = np.mean(scores)
+    else:
+        average_score = None
+
+    return average_score
+
+def average_articulation_rate(audio_data, sourcerun, path):
+    sound = parselmouth.Sound(audio_data)
+    segments = segment_audio(sound)
+
+    analyzed_segments_count = 0
+    insufficient_data_count = 0
+    articulation_rates = []
+
+    for segment in segments:
+        z2 = analyze_segment(segment, sourcerun, path)
+        if len(z2) > 3:
+            articulation_rates.append(float(z2[3]))
+            analyzed_segments_count += 1
+        else:
+            insufficient_data_count += 1
+
+    if articulation_rates:
+        average_rate = np.mean(articulation_rates)
+    else:
+        average_rate = None
+
+    return average_rate
+
+
 
 def calculate_score(positive_criteria_count, available_criteria_count):
     if available_criteria_count == 0:
@@ -113,16 +184,23 @@ async def analyze_pitch_endpoint(file: UploadFile = File(...)):
     pitch_result = classify_speaker(std_dev)
 
     volume_result = analyze_volume_praat(temp_file_path)
-    pitch_result = classify_speaker(std_dev)
 
     sound = parselmouth.Sound(temp_file_path)
     silences = analyze_silences_praat(sound)
     silence_result = classify_silences(silences)
+
+    sourcerun = "/Users/mayssachorfi/Documents/pitchlevelpraatapp/myprosody/myprosody/dataset/essen/myspsolution.praat"
+    path = "/Users/mayssachorfi/Documents/pitchlevelpraatapp/myprosody/myprosody/dataset/audioFiles"
+
+    average_score = average_pronunciation_score(temp_file_path, sourcerun, path)
+    average_rate = average_articulation_rate(temp_file_path, sourcerun, path)
     
-    available_criteria_count = 3
+    available_criteria_count = 5  
     positive_criteria_count = (1 if pitch_result == "Balanced" else 0) + \
                               (1 if volume_result == "Volume is ideal" else 0) + \
-                              (1 if silence_result == "normal" else 0)
+                              (1 if silence_result == "normal" else 0) + \
+                              (average_score * 1 if average_score else 0) + \
+                              (1 if average_rate >= 3 else 0)
 
     overall_score = calculate_score(positive_criteria_count, available_criteria_count)
 
@@ -130,10 +208,10 @@ async def analyze_pitch_endpoint(file: UploadFile = File(...)):
         "pitch_characteristic": pitch_result,
         "volume_characteristic": volume_result,
         "silence_characteristic": silence_result,
+        "pronunciation_score": average_score,
+        "articulation_rate": average_rate,
         "overall_score": overall_score
     }
-
-
 
 @app.post("/analyze_video/")
 async def analyze_video_pitch(file: UploadFile = File(...)):
@@ -145,7 +223,7 @@ async def analyze_video_pitch(file: UploadFile = File(...)):
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as audio_file:
         video_clip.audio.write_audiofile(audio_file.name)
         audio_file_path = audio_file.name
-        
+
     sound = parselmouth.Sound(audio_file_path)
     std_dev = analyze_pitch(audio_file_path)
     pitch_result = classify_speaker(std_dev)
@@ -155,13 +233,22 @@ async def analyze_video_pitch(file: UploadFile = File(...)):
     silences = analyze_silences_praat(sound)
     silence_result = classify_silences(silences)
 
-    available_criteria_count = 3  
+   
+    sourcerun = "/Users/mayssachorfi/Documents/pitchlevelpraatapp/myprosody/myprosody/dataset/essen/myspsolution.praat"
+    path = "/Users/mayssachorfi/Documents/pitchlevelpraatapp/myprosody/myprosody/dataset/audioFiles"
+
+    average_score = average_pronunciation_score(audio_file_path, sourcerun, path)
+    average_rate = average_articulation_rate(audio_file_path, sourcerun, path)
+    
+    available_criteria_count = 5  
     positive_criteria_count = (1 if pitch_result == "Balanced" else 0) + \
                               (1 if volume_result == "Volume is ideal" else 0) + \
-                              (1 if silence_result == "normal" else 0)
+                              (1 if silence_result == "normal" else 0) + \
+                              (average_score * 1 if average_score else 0) + \
+                              (1 if average_rate >= 3 else 0)
+
     overall_score = calculate_score(positive_criteria_count, available_criteria_count)
 
-    
     os.unlink(video_file_path)
     os.unlink(audio_file_path)
 
@@ -169,6 +256,7 @@ async def analyze_video_pitch(file: UploadFile = File(...)):
         "pitch_characteristic": pitch_result,
         "volume_characteristic": volume_result,
         "silence_characteristic": silence_result,
+        "pronunciation_score": average_score,
+        "articulation_rate": average_rate,
         "overall_score": overall_score
     }
-
